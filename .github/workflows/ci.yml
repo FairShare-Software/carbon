@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      TEST_OPENFGA_URL: http://localhost:8080
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      # Same version as iron's OpenFGA.
+      - name: Start OpenFGA
+        run: |
+          docker run -d -p 8080:8080 openfga/openfga:v1.22.0 run --playground-enabled=false
+          until curl -sf localhost:8080/healthz >/dev/null; do sleep 1; done
+      - run: test -z "$(gofmt -l .)" && go vet ./... && go test -v ./...

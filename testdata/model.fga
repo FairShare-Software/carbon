@@ -1,0 +1,17 @@
+# A small stand-in for iron's authz/model.fga: enough to test the client.
+model
+  schema 1.1
+
+type user
+
+type organization
+  relations
+    define member: [user]
+
+type app
+  relations
+    define user: [user, user with not_expired, organization#member]
+
+condition not_expired(current_time: timestamp, expires_at: timestamp) {
+  current_time < expires_at
+}
