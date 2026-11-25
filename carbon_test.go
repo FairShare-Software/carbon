@@ -21,7 +21,11 @@ import (
 
 // testMux is an app whose one route echoes the caller.
 func testMux(f *carbon.FGA) *http.ServeMux {
-	p := &carbon.Platform{Verifier: carbontest.Verifier(), FGA: f, Web: carbon.WebConfig{ProjectID: "p", APIKey: "k", AuthDomain: "p.firebaseapp.com"}}
+	p := &carbon.Platform{
+		Verifier: carbontest.Verifier(), FGA: f,
+		Web:  carbon.WebConfig{ProjectID: "p", APIKey: "k", AuthDomain: "p.firebaseapp.com"},
+		Apps: []carbon.App{{ID: "test", Name: "Test", URL: "https://test.example"}, {ID: "other", Name: "Other", URL: "https://other.example", Icon: "ticket"}},
+	}
 	api := http.NewServeMux()
 	api.HandleFunc("GET /me", func(w http.ResponseWriter, r *http.Request) {
 		carbon.WriteJSON(w, http.StatusOK, carbon.CurrentUser(r))
@@ -98,7 +102,7 @@ func TestWrongSigningKey(t *testing.T) {
 // Every route except /health and /config needs a token, including ones that don't exist.
 func TestDenyByDefault(t *testing.T) {
 	mux := testMux(carbontest.AllowAll(t))
-	for path, want := range map[string]int{"/health": 200, "/config": 200, "/anything": 401, "/me": 401} {
+	for path, want := range map[string]int{"/health": 200, "/config": 200, "/apps": 401, "/anything": 401, "/me": 401} {
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != want {
@@ -127,7 +131,7 @@ func TestHandler(t *testing.T) {
 	if rec.Code != http.StatusOK || rec.Body.String() != "<!doctype html>" {
 		t.Fatalf("web app: %d %q", rec.Code, rec.Body.String())
 	}
-	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-src https://p.firebaseapp.com") {
+	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-src https://p.firebaseapp.com") || !strings.Contains(csp, "img-src 'self' data: https://storage.googleapis.com;") {
 		t.Fatalf("csp %q", csp)
 	}
 }
@@ -150,6 +154,19 @@ func TestFGA(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		if rec.Code != want {
 			t.Errorf("%s: got %d, want %d", uid, rec.Code, want)
+		}
+	}
+
+	// /apps lists every app for anyone signed in, with whether they may use it.
+	for uid, want := range map[string]string{"ann": `true`, "nobody": `false`} {
+		req := httptest.NewRequest(http.MethodGet, "/apps", nil)
+		req.Header.Set("Authorization", carbontest.Bearer(t, uid))
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		body := `{"apps":[{"id":"test","name":"Test","url":"https://test.example","access":` + want +
+			`},{"id":"other","name":"Other","url":"https://other.example","icon":"ticket","access":false}]}` + "\n"
+		if rec.Code != http.StatusOK || rec.Body.String() != body {
+			t.Errorf("%s apps: %d %s", uid, rec.Code, rec.Body.String())
 		}
 	}
 

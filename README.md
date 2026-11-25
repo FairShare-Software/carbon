@@ -8,8 +8,10 @@ template):
   auth on Cloud Run), the `migrate` subcommand (goose), Identity Platform token
   verification, the central OpenFGA store, and one origin serving the API at
   `/api` and the web app at `/` with a strict CSP.
-- `Platform.Mux` serves `/health` and `/config`, and denies everything else to
-  callers without a valid token and access to the app (`app:<id>` in OpenFGA).
+- `Platform.Mux` serves `/health` and `/config`, `/apps` (every app in the
+  environment from `APPS`, and whether the caller may use each) to signed-in
+  callers, and denies everything else to callers without a valid token and
+  access to the app (`app:<id>` in OpenFGA).
 - `FGA`: check, list, read, write and delete tuples. `Identity`: invite people
   (create the account, email a sign-in link) and look up emails.
 - `carbontest`: signed test tokens, a fake Identity Platform, and fresh

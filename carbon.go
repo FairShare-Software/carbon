@@ -5,6 +5,7 @@ package carbon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log"
 	"net"
@@ -31,6 +32,17 @@ type Platform struct {
 	FGA      *FGA
 	Identity *Identity
 	Web      WebConfig
+	Apps     []App
+}
+
+// App is one FairShare app in this environment, for the app switcher (each
+// app's spec: components/schemas/App). Main reads them from APPS.
+type App struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	// Font Awesome icon name, like `ticket`; optional.
+	Icon string `json:"icon,omitempty"`
 }
 
 // WebConfig is the public sign-in config the web app loads before sign-in
@@ -42,9 +54,10 @@ type WebConfig struct {
 	Google     bool   `json:"google"`
 }
 
-// Mux serves GET /health and GET /config to anyone, and api to signed-in users
-// who may use app (app:<app> in OpenFGA). Deny by default: every other path,
-// ones that don't exist included, needs both. name is how the 403 names the app.
+// Mux serves GET /health and GET /config to anyone, GET /apps to signed-in
+// users, and api to signed-in users who may use app (app:<app> in OpenFGA).
+// Deny by default: every other path, ones that don't exist included, needs
+// both. name is how the 403 names the app.
 func (p *Platform) Mux(app, name string, api http.Handler) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +67,24 @@ func (p *Platform) Mux(app, name string, api http.Handler) *http.ServeMux {
 	mux.HandleFunc("GET /config", func(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusOK, p.Web)
 	})
+	// Every app, with whether the caller may use it: the app switcher shows the
+	// rest disabled. Open to anyone signed in, so it works where the 403 does.
+	mux.Handle("GET /apps", RequireUser(p.Verifier, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		type appAccess struct {
+			App
+			Access bool `json:"access"`
+		}
+		out := []appAccess{}
+		for _, a := range p.Apps {
+			ok, err := p.FGA.Check(r.Context(), UserRef(r), "user", "app:"+a.ID)
+			if err != nil {
+				ServerError(w, r, err)
+				return
+			}
+			out = append(out, appAccess{a, ok})
+		}
+		WriteJSON(w, http.StatusOK, map[string]any{"apps": out})
+	})))
 	mux.Handle("/", RequireUser(p.Verifier, requireApp(p.FGA, app, name, api)))
 	return mux
 }
@@ -63,11 +94,12 @@ func (p *Platform) Mux(app, name string, api http.Handler) *http.ServeMux {
 func Handler(api http.Handler, webDir, authDomain string) http.Handler {
 	// The web app holds ID tokens: allow scripts only from this origin (and
 	// Google's loader for the sign-in popup), and network calls only to the API
-	// and Identity Platform's sign-in endpoints.
+	// and Identity Platform's sign-in endpoints. Images may also come from Cloud
+	// Storage: profile pictures live in a public bucket.
 	csp := "default-src 'self'; script-src 'self' https://apis.google.com; " +
 		"connect-src 'self' https://identitytoolkit.googleapis.com https://securetoken.googleapis.com; " +
 		"frame-src https://" + authDomain + "; " +
-		"img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+		"img-src 'self' data: https://storage.googleapis.com; style-src 'self' 'unsafe-inline'; " +
 		"object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 	files := http.FileServer(http.Dir(webDir))
 	root := http.NewServeMux()
@@ -87,7 +119,8 @@ func Handler(api http.Handler, webDir, authDomain string) http.Handler {
 //
 // Environment: DATABASE_URL, IDENTITY_PROJECT_ID and OPENFGA_URL are required;
 // INSTANCE_CONNECTION_NAME, APP_DB_USER, MIGRATIONS_DIR, IDENTITY_API_KEY,
-// IDENTITY_AUTH_DOMAIN, IDENTITY_GOOGLE, WEB_DIR and PORT are optional.
+// IDENTITY_AUTH_DOMAIN, IDENTITY_GOOGLE, APPS, WEB_DIR and PORT are optional.
+// APPS is a JSON array of App: every app in this environment.
 func Main(mux func(*Platform) http.Handler) {
 	if os.Getenv("DATABASE_URL") == "" {
 		log.Fatal("DATABASE_URL is required")
@@ -120,6 +153,12 @@ func Main(mux func(*Platform) http.Handler) {
 	if web.AuthDomain == "" {
 		web.AuthDomain = projectID + ".firebaseapp.com"
 	}
+	var apps []App
+	if v := os.Getenv("APPS"); v != "" {
+		if err := json.Unmarshal([]byte(v), &apps); err != nil {
+			log.Fatalf("APPS: %v", err)
+		}
+	}
 	webDir := os.Getenv("WEB_DIR")
 	if webDir == "" {
 		webDir = "web/dist"
@@ -150,6 +189,7 @@ func Main(mux func(*Platform) http.Handler) {
 		FGA:      fga,
 		Identity: &Identity{HTTP: adminHTTP, BaseURL: "https://identitytoolkit.googleapis.com/v1", Project: projectID},
 		Web:      web,
+		Apps:     apps,
 	}
 
 	addr := ":" + os.Getenv("PORT")
